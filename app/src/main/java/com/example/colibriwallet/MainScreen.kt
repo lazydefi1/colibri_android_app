@@ -34,6 +34,20 @@ import com.example.colibriwallet.ble.ConnectionState
 
 @Composable
 fun MainScreen(viewModel: MainViewModel) {
+    val currentScreen = viewModel.currentScreen.collectAsState()
+
+    when (val screen = currentScreen.value) {
+        is Screen.DeviceList -> DeviceListScreen(viewModel)
+        is Screen.Connection -> ConnectionScreen(
+            viewModel = viewModel,
+            selectedDevice = screen.device,
+            onNavigateBack = { viewModel.navigateToDeviceList() }
+        )
+    }
+}
+
+@Composable
+fun DeviceListScreen(viewModel: MainViewModel) {
     val connectionState = viewModel.connectionState.collectAsState()
     val discoveredDevices = viewModel.discoveredDevices.collectAsState()
     val bondedDevices = viewModel.bondedDevices.collectAsState()
@@ -113,8 +127,7 @@ fun MainScreen(viewModel: MainViewModel) {
                         device = device,
                         isBonded = true
                     ) {
-                        // TODO: Add connect functionality for bonded devices
-                        viewModel.connectAndSendListMethods()
+                        viewModel.connectToDevice(device)
                     }
                 }
                 item {
@@ -136,8 +149,7 @@ fun MainScreen(viewModel: MainViewModel) {
                     device = device,
                     isBonded = false
                 ) {
-                    // TODO: Add connect functionality
-                    viewModel.connectAndSendListMethods()
+                    viewModel.connectToDevice(device)
                 }
             }
         }

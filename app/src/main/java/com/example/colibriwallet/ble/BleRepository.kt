@@ -148,6 +148,128 @@ class BleRepository @Inject constructor(
     }
 
     @RequiresPermission(allOf = ["android.permission.BLUETOOTH_CONNECT", "android.permission.BLUETOOTH_SCAN"])
+    suspend fun connectToSpecificDevice(device: BleDevice) {
+        _messages.send("Starting connection to ${device.displayName} (${device.address})")
+
+        if (gatt != null) {
+            _messages.send("Already connected to a device, disconnecting first...")
+            gatt?.close()
+            gatt = null
+        }
+
+        _connectionState.value = ConnectionState.Connecting
+        _messages.send("Initiating GATT connection...")
+
+        val success = connectToDevice(device.device)
+        if (success) {
+            _messages.send("Successfully connected to ${device.displayName}")
+            _messages.send("Connection established and services discovered")
+        } else {
+            _messages.send("Failed to connect to ${device.displayName}")
+        }
+    }
+
+    @RequiresPermission(allOf = ["android.permission.BLUETOOTH_CONNECT", "android.permission.BLUETOOTH_SCAN"])
+    private suspend fun connectToDevice(device: BluetoothDevice): Boolean {
+        _messages.send("Attempting to connect to device: ${device.address}")
+
+        return suspendCancellableCoroutine { cont ->
+            gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                device.connectGatt(context, false, object : BluetoothGattCallback() {
+                    override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                        when (newState) {
+                            BluetoothGatt.STATE_CONNECTED -> {
+                                _messages.trySend("GATT connection established, discovering services...")
+                                gatt.discoverServices()
+                            }
+                            BluetoothGatt.STATE_DISCONNECTED -> {
+                                _messages.trySend("Device disconnected")
+                                _connectionState.value = ConnectionState.Failed("Disconnected")
+                                cont.resume(false) {}
+                            }
+                            BluetoothGatt.STATE_CONNECTING -> {
+                                _messages.trySend("Connecting to GATT server...")
+                            }
+                        }
+                    }
+
+                    override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                        _messages.trySend("Services discovered, looking for Colibri service...")
+
+                        var colibriServiceFound = false
+                        for (service in gatt.services) {
+                            _messages.trySend("Found service: ${service.uuid}")
+                            if (service.uuid == BleConstants.COLIBRI_SERVICE_UUID) {
+                                colibriServiceFound = true
+                                _messages.trySend("Colibri service found! Looking for characteristics...")
+
+                                for (ch in service.characteristics) {
+                                    _messages.trySend("Found characteristic: ${ch.uuid}")
+                                    when (ch.uuid) {
+                                        BleConstants.COLIBRI_WRITE_CHARACTERISTIC_UUID -> {
+                                            writeChar = ch
+                                            _messages.trySend("Write characteristic configured")
+                                        }
+                                        BleConstants.COLIBRI_NOTIFY_CHARACTERISTIC_UUID -> {
+                                            notifyChar = ch
+                                            _messages.trySend("Notify characteristic found, enabling notifications...")
+                                            gatt.setCharacteristicNotification(ch, true)
+                                            _messages.trySend("Notifications enabled")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!colibriServiceFound) {
+                            _messages.trySend("Colibri service not found on device")
+                            _connectionState.value = ConnectionState.Failed("Colibri service not found")
+                            cont.resume(false) {}
+                            return
+                        }
+
+                        if (writeChar != null && notifyChar != null) {
+                            _messages.trySend("All required characteristics found - connection ready!")
+                            _connectionState.value = ConnectionState.Connected
+                            cont.resume(true) {}
+                        } else {
+                            val missing = mutableListOf<String>()
+                            if (writeChar == null) missing.add("write")
+                            if (notifyChar == null) missing.add("notify")
+                            _messages.trySend("Missing characteristics: ${missing.joinToString(", ")}")
+                            _connectionState.value = ConnectionState.Failed("Missing characteristics: ${missing.joinToString(", ")}")
+                            cont.resume(false) {}
+                        }
+                    }
+                }, BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M)
+            } else {
+                device.connectGatt(context, false, object : BluetoothGattCallback() {
+                    override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                        when (newState) {
+                            BluetoothGatt.STATE_CONNECTED -> {
+                                _messages.trySend("GATT connection established (legacy), discovering services...")
+                                gatt.discoverServices()
+                            }
+                            BluetoothGatt.STATE_DISCONNECTED -> {
+                                _messages.trySend("Device disconnected")
+                                _connectionState.value = ConnectionState.Failed("Disconnected")
+                                cont.resume(false) {}
+                            }
+                        }
+                    }
+
+                    override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                        // Same logic as above but for older Android versions
+                        _messages.trySend("Services discovered (legacy mode)")
+                        // ... (same service discovery logic)
+                        cont.resume(false) {} // Placeholder - implement if needed
+                    }
+                })
+            }
+        }
+    }
+
+    @RequiresPermission(allOf = ["android.permission.BLUETOOTH_CONNECT", "android.permission.BLUETOOTH_SCAN"])
     private suspend fun _connect(): Boolean {
         if (gatt != null) return true
         _connectionState.value = ConnectionState.Connecting
@@ -169,60 +291,28 @@ class BleRepository @Inject constructor(
         val dev = device ?: return false.also {
             _connectionState.value = ConnectionState.Failed("Device not found")
         }
-        return suspendCancellableCoroutine { cont ->
-            gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                dev.connectGatt(context, false, object : BluetoothGattCallback() {
-                    override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-                        if (newState == BluetoothGatt.STATE_CONNECTED) {
-                            gatt.discoverServices()
-                        } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
-                            _connectionState.value = ConnectionState.Failed("Disconnected")
-                            cont.resume(false) {}
-                        }
-                    }
-
-                    override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-                        for (service in gatt.services) {
-                            if (service.uuid == BleConstants.COLIBRI_SERVICE_UUID) {
-                                for (ch in service.characteristics) {
-                                    when (ch.uuid) {
-                                        BleConstants.COLIBRI_WRITE_CHARACTERISTIC_UUID -> writeChar = ch
-                                        BleConstants.COLIBRI_NOTIFY_CHARACTERISTIC_UUID -> {
-                                            notifyChar = ch
-                                            gatt.setCharacteristicNotification(ch, true)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (writeChar != null && notifyChar != null) {
-                            _connectionState.value = ConnectionState.Connected
-                            cont.resume(true) {}
-                        } else {
-                            _connectionState.value = ConnectionState.Failed("Chars missing")
-                            cont.resume(false) {}
-                        }
-                    }
-                }, BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M)
-            } else {
-                dev.connectGatt(context, false, object : BluetoothGattCallback() {})
-            }
-        }
+        return connectToDevice(dev)
     }
 
     suspend fun sendRpc(json: String): String {
         val char = writeChar ?: return "No write char"
         val g = gatt ?: return "No gatt"
+
+        _messages.send("Sending RPC command: $json")
+
         val data = json.toByteArray(Charset.forName("UTF-8"))
         char.value = data
+
         return suspendCancellableCoroutine { cont ->
             val cb = object : BluetoothGattCallback() {
                 override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
                     val value = characteristic.value.toString(Charsets.UTF_8)
+                    _messages.trySend("Received response: $value")
                     cont.resume(value) {}
                 }
             }
             g.setCharacteristicNotification(notifyChar, true)
+            _messages.trySend("Writing command to device...")
             g.writeCharacteristic(char)
         }
     }
@@ -245,3 +335,4 @@ class BleRepository @Inject constructor(
         _connectionState.value = ConnectionState.Disconnected
     }
 }
+
