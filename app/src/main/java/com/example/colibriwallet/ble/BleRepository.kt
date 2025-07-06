@@ -44,6 +44,102 @@ class BleRepository @Inject constructor(
     private val _messages = Channel<String>(Channel.BUFFERED)
     val messages: Flow<String> = flow { for (m in _messages) emit(m) }
 
+    // Device discovery
+    private val _discoveredDevices = MutableStateFlow<List<BleDevice>>(emptyList())
+    val discoveredDevices: StateFlow<List<BleDevice>> = _discoveredDevices
+
+    private val _bondedDevices = MutableStateFlow<List<BleDevice>>(emptyList())
+    val bondedDevices: StateFlow<List<BleDevice>> = _bondedDevices
+
+    private val _isScanning = MutableStateFlow(false)
+    val isScanning: StateFlow<Boolean> = _isScanning
+
+    @RequiresPermission("android.permission.BLUETOOTH_CONNECT")
+    fun getBondedDevices() {
+        try {
+            val bondedDevices = adapter.bondedDevices
+            val bleDevices = bondedDevices
+                .filter { it.type == BluetoothDevice.DEVICE_TYPE_LE || it.type == BluetoothDevice.DEVICE_TYPE_DUAL }
+                .map { device ->
+                    BleDevice(
+                        device = device,
+                        name = device.name ?: "Bonded Device",
+                        address = device.address,
+                        rssi = -50, // Unknown RSSI for bonded devices
+                        serviceUuids = emptyList(), // Can't get services without scanning
+                        isConnectable = true
+                    )
+                }
+            _bondedDevices.value = bleDevices
+            _messages.trySend("Found ${bleDevices.size} bonded BLE devices")
+        } catch (e: Exception) {
+            _messages.trySend("Error getting bonded devices: ${e.message}")
+        }
+    }
+
+    @RequiresPermission(allOf = ["android.permission.BLUETOOTH_CONNECT", "android.permission.BLUETOOTH_SCAN"])
+    suspend fun startDeviceDiscovery() {
+        if (_isScanning.value) return
+
+        _isScanning.value = true
+        _discoveredDevices.value = emptyList()
+        _messages.send("Starting BLE device scan...")
+
+        val scanner = adapter.bluetoothLeScanner
+        val discoveredDevicesMap = mutableMapOf<String, BleDevice>()
+
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                val device = result.device
+                val scanRecord = result.scanRecord
+                val serviceUuids = scanRecord?.serviceUuids?.map { it.toString() } ?: emptyList()
+
+                                // Try to get device name from multiple sources
+                val deviceName = device.name
+                    ?: scanRecord?.deviceName
+                    ?: getManufacturerName(scanRecord)
+                    ?: "Unknown Device"
+
+                // Debug: Log scan record info
+                _messages.trySend("Device: ${device.address} | Name: ${device.name} | ScanRecord Name: ${scanRecord?.deviceName} | Manufacturer: ${getManufacturerName(scanRecord)}")
+
+                val bleDevice = BleDevice(
+                    device = device,
+                    name = deviceName,
+                    address = device.address,
+                    rssi = result.rssi,
+                    serviceUuids = serviceUuids,
+                    isConnectable = result.isConnectable
+                )
+
+                // Update or add device (use address as key to avoid duplicates)
+                discoveredDevicesMap[device.address] = bleDevice
+                _discoveredDevices.value = discoveredDevicesMap.values.sortedByDescending { it.rssi }
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                _isScanning.value = false
+                _messages.trySend("Scan failed with error: $errorCode")
+            }
+        }
+
+        try {
+            scanner.startScan(callback)
+
+            // Scan for 10 seconds
+            kotlinx.coroutines.delay(10000)
+
+            scanner.stopScan(callback)
+            _isScanning.value = false
+            _messages.send("Scan completed. Found ${discoveredDevicesMap.size} devices.")
+
+        } catch (e: Exception) {
+            scanner.stopScan(callback)
+            _isScanning.value = false
+            _messages.send("Scan error: ${e.message}")
+        }
+    }
+
     @RequiresPermission(allOf = ["android.permission.BLUETOOTH_CONNECT", "android.permission.BLUETOOTH_SCAN"])
     suspend fun connectAndSendListMethods() {
         if (!_connect()) return
@@ -129,6 +225,27 @@ class BleRepository @Inject constructor(
             g.setCharacteristicNotification(notifyChar, true)
             g.writeCharacteristic(char)
         }
+    }
+
+    private fun getManufacturerName(scanRecord: ScanRecord?): String? {
+        scanRecord?.manufacturerSpecificData?.let { manufacturerData ->
+            // Check if the SparseArray has any elements before accessing
+            if (manufacturerData.size() > 0) {
+                val companyId = manufacturerData.keyAt(0)
+                return when (companyId) {
+                    0x004C -> "Apple"
+                    0x0006 -> "Microsoft"
+                    0x00E0 -> "Google"
+                    0x0075 -> "Samsung"
+                    0x000F -> "Broadcom"
+                    0x0087 -> "Garmin"
+                    0x01D7 -> "Qualcomm"
+                    0x02E5 -> "Espressif" // ESP32 manufacturer
+                    else -> "Manufacturer ID: 0x${companyId.toString(16).uppercase()}"
+                }
+            }
+        }
+        return null
     }
 
     fun close() {

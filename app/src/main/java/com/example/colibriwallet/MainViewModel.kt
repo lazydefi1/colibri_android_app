@@ -16,13 +16,21 @@ class MainViewModel @Inject constructor(
 
     val connectionState: StateFlow<ConnectionState> = repository.connectionState
     val messages = repository.messages
+    val discoveredDevices = repository.discoveredDevices
+    val bondedDevices = repository.bondedDevices
+    val isScanning = repository.isScanning
 
-    fun connectAndSendListMethods() {
+    fun getBondedDevices() {
+        repository.getBondedDevices()
+    }
+
+    fun startDeviceDiscovery() {
         viewModelScope.launch {
-            repository.connectAndSendListMethods()
+            repository.startDeviceDiscovery()
         }
     }
-    init {
+
+    fun connectAndSendListMethods() {
         viewModelScope.launch {
             repository.connectAndSendListMethods()
         }
