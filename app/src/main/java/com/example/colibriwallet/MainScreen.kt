@@ -29,6 +29,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.colibriwallet.ble.BleDevice
+import com.example.colibriwallet.ble.BleConstants
 import com.example.colibriwallet.ble.ConnectionState
 
 @Composable
@@ -221,7 +222,7 @@ fun BleDeviceCard(
                         )
                     } else {
                         Text(
-                            text = "Bonded device (RSSI unknown)",
+                            text = BleConstants.BondedDeviceDefaults.UNKNOWN_RSSI_TEXT,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

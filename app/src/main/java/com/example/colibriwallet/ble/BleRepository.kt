@@ -27,7 +27,7 @@ import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private val SERVICE_UUID = UUID.fromString("31415926-5358-9793-2384-626433832795")
+// Import constants - using object reference for UUIDs
 
 @Singleton
 class BleRepository @Inject constructor(
@@ -65,7 +65,7 @@ class BleRepository @Inject constructor(
                         device = device,
                         name = device.name ?: "Bonded Device",
                         address = device.address,
-                        rssi = -50, // Unknown RSSI for bonded devices
+                        rssi = BleConstants.BondedDeviceDefaults.DEFAULT_RSSI, // Unknown RSSI for bonded devices
                         serviceUuids = emptyList(), // Can't get services without scanning
                         isConnectable = true
                     )
@@ -126,8 +126,8 @@ class BleRepository @Inject constructor(
         try {
             scanner.startScan(callback)
 
-            // Scan for 10 seconds
-            kotlinx.coroutines.delay(10000)
+            // Scan for configured duration
+            kotlinx.coroutines.delay(BleConstants.ScanSettings.SCAN_DURATION_MS)
 
             scanner.stopScan(callback)
             _isScanning.value = false
@@ -155,14 +155,14 @@ class BleRepository @Inject constructor(
         var device: BluetoothDevice? = null
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-                if (result.scanRecord?.serviceUuids?.contains(ParcelUuid(SERVICE_UUID)) == true) {
+                if (result.scanRecord?.serviceUuids?.contains(ParcelUuid(BleConstants.COLIBRI_SERVICE_UUID)) == true) {
                     device = result.device
                 }
             }
         }
-        scanner.startScan(listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()),
+        scanner.startScan(listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(BleConstants.COLIBRI_SERVICE_UUID)).build()),
             ScanSettings.Builder().build(), callback)
-        withTimeout(15000) {
+        withTimeout(BleConstants.ConnectionSettings.CONNECTION_TIMEOUT_MS) {
             while (device == null) kotlinx.coroutines.delay(500)
         }
         scanner.stopScan(callback)
@@ -183,11 +183,11 @@ class BleRepository @Inject constructor(
 
                     override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
                         for (service in gatt.services) {
-                            if (service.uuid == SERVICE_UUID) {
+                            if (service.uuid == BleConstants.COLIBRI_SERVICE_UUID) {
                                 for (ch in service.characteristics) {
                                     when (ch.uuid) {
-                                        shortUuidTo128(0xC001) -> writeChar = ch
-                                        shortUuidTo128(0xC000) -> {
+                                        BleConstants.COLIBRI_WRITE_CHARACTERISTIC_UUID -> writeChar = ch
+                                        BleConstants.COLIBRI_NOTIFY_CHARACTERISTIC_UUID -> {
                                             notifyChar = ch
                                             gatt.setCharacteristicNotification(ch, true)
                                         }
@@ -232,17 +232,8 @@ class BleRepository @Inject constructor(
             // Check if the SparseArray has any elements before accessing
             if (manufacturerData.size() > 0) {
                 val companyId = manufacturerData.keyAt(0)
-                return when (companyId) {
-                    0x004C -> "Apple"
-                    0x0006 -> "Microsoft"
-                    0x00E0 -> "Google"
-                    0x0075 -> "Samsung"
-                    0x000F -> "Broadcom"
-                    0x0087 -> "Garmin"
-                    0x01D7 -> "Qualcomm"
-                    0x02E5 -> "Espressif" // ESP32 manufacturer
-                    else -> "Manufacturer ID: 0x${companyId.toString(16).uppercase()}"
-                }
+                return BleConstants.MANUFACTURER_NAMES[companyId]
+                    ?: "Manufacturer ID: 0x${companyId.toString(16).uppercase()}"
             }
         }
         return null
