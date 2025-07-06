@@ -23,6 +23,9 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
 import java.nio.charset.Charset
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -37,6 +40,19 @@ class BleRepository @Inject constructor(
     private var gatt: BluetoothGatt? = null
     private var writeChar: BluetoothGattCharacteristic? = null
     private var notifyChar: BluetoothGattCharacteristic? = null
+    private var currentGattCallback: BluetoothGattCallback? = null
+
+    // Response assembly for large responses
+    private val responseBuffer = StringBuilder()
+    private var expectedResponseEnd = "}"
+
+    // Timestamp formatter for debug messages
+    private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
+
+    private fun logWithTimestamp(message: String) {
+        val timestamp = timeFormat.format(Date())
+        _messages.trySend("[$timestamp] $message")
+    }
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState
@@ -174,13 +190,17 @@ class BleRepository @Inject constructor(
         _messages.send("Attempting to connect to device: ${device.address}")
 
         return suspendCancellableCoroutine { cont ->
-            gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                device.connectGatt(context, false, object : BluetoothGattCallback() {
+            val connectionCallback = object : BluetoothGattCallback() {
                     override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                         when (newState) {
                             BluetoothGatt.STATE_CONNECTED -> {
-                                _messages.trySend("GATT connection established, discovering services...")
-                                gatt.discoverServices()
+                                _messages.trySend("GATT connection established, requesting larger MTU...")
+                                // Request larger MTU to handle bigger responses
+                                val mtuRequested = gatt.requestMtu(512)
+                                if (!mtuRequested) {
+                                    _messages.trySend("Failed to request MTU, proceeding with default")
+                                    gatt.discoverServices()
+                                }
                             }
                             BluetoothGatt.STATE_DISCONNECTED -> {
                                 _messages.trySend("Device disconnected")
@@ -191,6 +211,17 @@ class BleRepository @Inject constructor(
                                 _messages.trySend("Connecting to GATT server...")
                             }
                         }
+                    }
+
+                    override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+                        if (status == BluetoothGatt.GATT_SUCCESS) {
+                            _messages.trySend("✅ MTU negotiated: $mtu bytes")
+                            _messages.trySend("📡 Max notification size: ${mtu - 3} bytes")
+                        } else {
+                            _messages.trySend("❌ MTU negotiation failed (status: $status), using default 20 bytes")
+                        }
+                        _messages.trySend("Discovering services...")
+                        gatt.discoverServices()
                     }
 
                     override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
@@ -210,12 +241,21 @@ class BleRepository @Inject constructor(
                                             writeChar = ch
                                             _messages.trySend("Write characteristic configured")
                                         }
-                                        BleConstants.COLIBRI_NOTIFY_CHARACTERISTIC_UUID -> {
-                                            notifyChar = ch
-                                            _messages.trySend("Notify characteristic found, enabling notifications...")
-                                            gatt.setCharacteristicNotification(ch, true)
-                                            _messages.trySend("Notifications enabled")
-                                        }
+                                                                BleConstants.COLIBRI_NOTIFY_CHARACTERISTIC_UUID -> {
+                            notifyChar = ch
+                            _messages.trySend("Notify characteristic found, enabling notifications...")
+                            gatt.setCharacteristicNotification(ch, true)
+
+                            // Enable notifications on the descriptor
+                            val descriptor = ch.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))
+                            if (descriptor != null) {
+                                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                                gatt.writeDescriptor(descriptor)
+                                _messages.trySend("Notification descriptor enabled")
+                            } else {
+                                _messages.trySend("Warning: Could not find notification descriptor")
+                            }
+                        }
                                     }
                                 }
                             }
@@ -241,30 +281,27 @@ class BleRepository @Inject constructor(
                             cont.resume(false) {}
                         }
                     }
-                }, BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M)
-            } else {
-                device.connectGatt(context, false, object : BluetoothGattCallback() {
-                    override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-                        when (newState) {
-                            BluetoothGatt.STATE_CONNECTED -> {
-                                _messages.trySend("GATT connection established (legacy), discovering services...")
-                                gatt.discoverServices()
-                            }
-                            BluetoothGatt.STATE_DISCONNECTED -> {
-                                _messages.trySend("Device disconnected")
-                                _connectionState.value = ConnectionState.Failed("Disconnected")
-                                cont.resume(false) {}
-                            }
-                        }
-                    }
 
-                    override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-                        // Same logic as above but for older Android versions
-                        _messages.trySend("Services discovered (legacy mode)")
-                        // ... (same service discovery logic)
-                        cont.resume(false) {} // Placeholder - implement if needed
-                    }
-                })
+                override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+                    // Delegate to current RPC callback if available
+                    currentGattCallback?.onCharacteristicChanged(gatt, characteristic)
+                }
+
+                override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+                    // Delegate to current RPC callback if available
+                    currentGattCallback?.onCharacteristicWrite(gatt, characteristic, status)
+                }
+
+                override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                    // Delegate to current RPC callback if available
+                    currentGattCallback?.onDescriptorWrite(gatt, descriptor, status)
+                }
+            }
+
+            gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                device.connectGatt(context, false, connectionCallback, BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M)
+            } else {
+                device.connectGatt(context, false, connectionCallback)
             }
         }
     }
@@ -295,25 +332,127 @@ class BleRepository @Inject constructor(
     }
 
     suspend fun sendRpc(json: String): String {
-        val char = writeChar ?: return "No write char"
-        val g = gatt ?: return "No gatt"
+        val char = writeChar ?: return """{"error": "No write characteristic available"}"""
+        val g = gatt ?: return """{"error": "No GATT connection available"}"""
 
-        _messages.send("Sending RPC command: $json")
+        logWithTimestamp("Sending RPC command: $json")
 
         val data = json.toByteArray(Charset.forName("UTF-8"))
         char.value = data
 
-        return suspendCancellableCoroutine { cont ->
-            val cb = object : BluetoothGattCallback() {
-                override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-                    val value = characteristic.value.toString(Charsets.UTF_8)
-                    _messages.trySend("Received response: $value")
-                    cont.resume(value) {}
+        // Clear any previous response buffer
+        responseBuffer.clear()
+
+        return try {
+            withTimeout(30000) { // 30 second timeout for large responses
+                suspendCancellableCoroutine { cont ->
+                    // Create a new callback for this RPC call
+                    currentGattCallback = object : BluetoothGattCallback() {
+                                                    override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+                                if (characteristic.uuid == BleConstants.COLIBRI_NOTIFY_CHARACTERISTIC_UUID) {
+                                    val chunk = String(characteristic.value, Charsets.UTF_8)
+                                    logWithTimestamp("📥 Notification received: ${characteristic.value.size} bytes")
+                                    logWithTimestamp("Raw bytes: ${characteristic.value.joinToString(" ") { "%02x".format(it) }}")
+                                    logWithTimestamp("Chunk content: '$chunk'")
+
+                                    responseBuffer.append(chunk)
+
+                                    // Check if this appears to be the end of the response
+                                    val currentResponse = responseBuffer.toString()
+                                    logWithTimestamp("📊 Buffer now has ${currentResponse.length} bytes total")
+                                    logWithTimestamp("Checking if response is complete...")
+                                    if (isCompleteJsonResponse(currentResponse)) {
+                                        logWithTimestamp("✅ Complete response detected! (${currentResponse.length} bytes)")
+                                        logWithTimestamp("Full response: $currentResponse")
+                                        cont.resume(currentResponse) {}
+                                    } else {
+                                        logWithTimestamp("⏳ Still incomplete: ${currentResponse.length} bytes")
+                                        logWithTimestamp("⏳ Waiting for more notifications...")
+                                    }
+                                }
+                            }
+
+                        override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+                            if (status == BluetoothGatt.GATT_SUCCESS) {
+                                logWithTimestamp("Command written successfully, waiting for response...")
+                            } else {
+                                logWithTimestamp("Failed to write command (status: $status)")
+                                cont.resume("""{"error": "Failed to write command", "status": $status}""") {}
+                            }
+                        }
+
+                        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                            if (status == BluetoothGatt.GATT_SUCCESS) {
+                                _messages.trySend("Notifications properly enabled")
+                            } else {
+                                _messages.trySend("Failed to enable notifications (status: $status)")
+                            }
+                        }
+                    }
+
+                    logWithTimestamp("Writing command to device...")
+                    val writeSuccess = g.writeCharacteristic(char)
+                    if (!writeSuccess) {
+                        logWithTimestamp("Failed to initiate write operation")
+                        cont.resume("""{"error": "Failed to initiate write operation"}""") {}
+                    }
                 }
             }
-            g.setCharacteristicNotification(notifyChar, true)
-            _messages.trySend("Writing command to device...")
-            g.writeCharacteristic(char)
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            val partialResponse = responseBuffer.toString()
+            logWithTimestamp("⏰ TIMEOUT after 30s")
+            logWithTimestamp("⏰ Partial response received: ${partialResponse.length} bytes")
+            logWithTimestamp("⏰ Content: '$partialResponse'")
+            responseBuffer.clear()
+            """{"error": "RPC call timed out", "partial_response": "$partialResponse", "bytes_received": ${partialResponse.length}}"""
+        } catch (e: Exception) {
+            val partialResponse = responseBuffer.toString()
+            logWithTimestamp("❌ RPC call failed: ${e.message}")
+            logWithTimestamp("❌ Partial response received: ${partialResponse.length} bytes")
+            responseBuffer.clear()
+            """{"error": "RPC call failed", "message": "${e.message}", "partial_response": "$partialResponse"}"""
+        }
+    }
+
+    private fun isCompleteJsonResponse(response: String): Boolean {
+        if (response.isEmpty()) {
+            logWithTimestamp("🔍 JSON check: Empty response")
+            return false
+        }
+
+        try {
+            // Enhanced JSON validation - count braces and brackets
+            var braceCount = 0
+            var bracketCount = 0
+            var inString = false
+            var escaped = false
+
+            for (char in response) {
+                when {
+                    escaped -> escaped = false
+                    char == '\\' && inString -> escaped = true
+                    char == '"' && !escaped -> inString = !inString
+                    !inString && char == '{' -> braceCount++
+                    !inString && char == '}' -> braceCount--
+                    !inString && char == '[' -> bracketCount++
+                    !inString && char == ']' -> bracketCount--
+                }
+            }
+
+            // Response is complete if all braces and brackets are balanced
+            // and it ends with } or ]
+            val trimmed = response.trim()
+            val isBalanced = braceCount == 0 && bracketCount == 0
+            val endsCorrectly = trimmed.endsWith('}') || trimmed.endsWith(']')
+
+            logWithTimestamp("🔍 JSON check: braces=$braceCount, brackets=$bracketCount, balanced=$isBalanced, ends_correctly=$endsCorrectly")
+            logWithTimestamp("🔍 Last 20 chars: '${response.takeLast(20)}'")
+
+            return isBalanced && endsCorrectly && trimmed.isNotEmpty()
+        } catch (e: Exception) {
+            logWithTimestamp("🔍 JSON parsing error: ${e.message}")
+            // If JSON parsing fails, assume it's incomplete
+            return false
         }
     }
 
@@ -330,8 +469,12 @@ class BleRepository @Inject constructor(
     }
 
     fun close() {
+        currentGattCallback = null
+        responseBuffer.clear()
         gatt?.close()
         gatt = null
+        writeChar = null
+        notifyChar = null
         _connectionState.value = ConnectionState.Disconnected
     }
 }

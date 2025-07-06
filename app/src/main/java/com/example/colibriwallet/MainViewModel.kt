@@ -15,6 +15,7 @@ import com.example.colibriwallet.ble.ConnectionState
 sealed class Screen {
     object DeviceList : Screen()
     data class Connection(val device: BleDevice) : Screen()
+    data class Methods(val device: BleDevice, val response: String) : Screen()
 }
 
 @HiltViewModel
@@ -31,6 +32,10 @@ class MainViewModel @Inject constructor(
     // Navigation state
     private val _currentScreen = MutableStateFlow<Screen>(Screen.DeviceList)
     val currentScreen: StateFlow<Screen> = _currentScreen
+
+    // RPC response state
+    private val _lastRpcResponse = MutableStateFlow("")
+    val lastRpcResponse: StateFlow<String> = _lastRpcResponse
 
     fun getBondedDevices() {
         repository.getBondedDevices()
@@ -57,10 +62,56 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun sendListMethods() {
+            fun sendListMethods() {
+        // Navigate to methods screen immediately when button is tapped
+        val current = _currentScreen.value
+        if (current is Screen.Connection) {
+            _currentScreen.value = Screen.Methods(current.device, "")
+        }
+
+        // Then send the RPC command in the background
         viewModelScope.launch {
             val response = repository.sendRpc("""{"method":"listMethods"}""")
-            // Message will be automatically added to the messages flow
+            _lastRpcResponse.value = response
+
+            // Update the methods screen with the response
+            val currentScreen = _currentScreen.value
+            if (currentScreen is Screen.Methods) {
+                _currentScreen.value = Screen.Methods(currentScreen.device, response)
+            }
+        }
+    }
+
+    fun sendGetStatus() {
+        // Navigate to methods screen immediately when button is tapped
+        val current = _currentScreen.value
+        if (current is Screen.Connection) {
+            _currentScreen.value = Screen.Methods(current.device, "")
+        }
+
+        // Then send the RPC command in the background
+        viewModelScope.launch {
+            val response = repository.sendRpc("""{"method":"getStatus"}""")
+            _lastRpcResponse.value = response
+
+            // Update the methods screen with the response
+            val currentScreen = _currentScreen.value
+            if (currentScreen is Screen.Methods) {
+                _currentScreen.value = Screen.Methods(currentScreen.device, response)
+            }
+        }
+    }
+
+    fun sendCustomRpc(rpcCommand: String) {
+        viewModelScope.launch {
+            val response = repository.sendRpc(rpcCommand)
+            _lastRpcResponse.value = response
+
+            // Update methods screen if we're currently on it
+            val current = _currentScreen.value
+            if (current is Screen.Methods) {
+                _currentScreen.value = Screen.Methods(current.device, response)
+            }
         }
     }
 
@@ -70,6 +121,17 @@ class MainViewModel @Inject constructor(
 
     fun navigateToConnection(device: BleDevice) {
         _currentScreen.value = Screen.Connection(device)
+    }
+
+    fun navigateToMethods(device: BleDevice, response: String) {
+        _currentScreen.value = Screen.Methods(device, response)
+    }
+
+    fun navigateBackFromMethods() {
+        val current = _currentScreen.value
+        if (current is Screen.Methods) {
+            _currentScreen.value = Screen.Connection(current.device)
+        }
     }
 
     override fun onCleared() {

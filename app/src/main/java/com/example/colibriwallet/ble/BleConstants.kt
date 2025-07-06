@@ -72,6 +72,8 @@ object BleConstants {
         const val DEFAULT_MTU = 247
         const val RECONNECT_ATTEMPTS = 3
         const val RECONNECT_DELAY_MS = 1000L
+        const val RPC_TIMEOUT_MS = 30000L // 30 seconds for RPC calls
+        const val MAX_RESPONSE_SIZE = 8192 // 8KB max response size
     }
 
     // RSSI Thresholds for Signal Strength

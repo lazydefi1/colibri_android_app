@@ -202,7 +202,14 @@ fun ConnectionScreen(
                     onClick = { viewModel.sendListMethods() },
                     modifier = Modifier.weight(1f)
                 ) {
-                    Text("List Methods")
+                    Text("listMethods")
+                }
+
+                Button(
+                    onClick = { viewModel.sendGetStatus() },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("getStatus")
                 }
             }
         }

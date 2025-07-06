@@ -43,6 +43,12 @@ fun MainScreen(viewModel: MainViewModel) {
             selectedDevice = screen.device,
             onNavigateBack = { viewModel.navigateToDeviceList() }
         )
+        is Screen.Methods -> MethodsScreen(
+            viewModel = viewModel,
+            selectedDevice = screen.device,
+            rpcResponse = screen.response,
+            onNavigateBack = { viewModel.navigateBackFromMethods() }
+        )
     }
 }
 
